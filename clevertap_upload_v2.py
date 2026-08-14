@@ -369,7 +369,17 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
 
             if row_count > 0:
                 print(f"    📤 Uploading {row_count:,} rows to CleverTap...")
-                upload_to_clevertap(temp_csv, segment_name)
+                upload_succeeded = upload_to_clevertap(temp_csv, segment_name)
+                if not upload_succeeded:
+                    # upload_to_clevertap prints its own "CT Step N Failed"
+                    # detail above -- this raise is what makes that failure
+                    # actually COUNT. Without it, a False return here was
+                    # silently treated as success: no retry, and the cohort
+                    # never landed in failed_cohorts even though no segment
+                    # was ever created.
+                    raise RuntimeError(
+                        f"CleverTap upload failed for {label} -- see CT Step error above."
+                    )
             elif row_count == 0:
                 print("    ⚠️ 0 rows returned. Skipping upload.")
 
