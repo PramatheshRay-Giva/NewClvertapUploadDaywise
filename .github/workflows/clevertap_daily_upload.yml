@@ -36,10 +36,11 @@ on:
         default: ''
       cohorts:
         description: >
-          Override which cohorts to run for that day. One "tactic | discount"
-          pair per line, e.g.:
-            Next Repeat Order Any - Offline Gold | BAU Offers
-            Online to Offline - Gold | 2000 Promo coins
+          Override which cohorts to run for that day. Semicolon-separated,
+          all on one line (this box doesn't accept multiple lines):
+          tactic | discount; tactic | discount -- e.g.:
+          Next Repeat Order Any - Offline Gold | BAU Offers; Online to
+          Offline - Gold | 2000 Promo coins
           Leave blank to run every cohort discovered for that day.
         required: false
         type: string
