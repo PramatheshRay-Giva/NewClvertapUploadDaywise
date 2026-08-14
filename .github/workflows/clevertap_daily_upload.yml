@@ -67,4 +67,4 @@ jobs:
           CT_PASSCODE: ${{ secrets.CT_PASSCODE }}
           OVERRIDE_DAY: ${{ github.event.inputs.day }}
           OVERRIDE_COHORTS: ${{ github.event.inputs.cohorts }}
-        run: python clevertap_upload_v2.py
+        run: python -u clevertap_upload_v2.py  # -u = unbuffered stdout, so log lines appear as they're printed instead of arriving in delayed batches
