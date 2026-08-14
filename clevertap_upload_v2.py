@@ -249,27 +249,38 @@ def get_target_day():
 
 
 def get_cohort_override():
-    """OVERRIDE_COHORTS env var (from workflow_dispatch's "cohorts" input),
-    parsed from "tactic | discount" lines into a list of
-    {"p1_p2_p3": ..., "discount": ...} dicts. Returns None if unset/blank --
-    the caller should fall back to full auto-discovery in that case. Blank
-    lines are skipped; a malformed line (missing the "|") raises rather than
-    silently dropping a cohort you thought you'd included."""
+    """OVERRIDE_COHORTS env var (from workflow_dispatch's "cohorts" input).
+
+    GitHub's manual-trigger form renders string inputs as a single-line box
+    -- pasting multi-line text into it collapses everything onto one line,
+    so newline-separated entries don't survive that UI. Cohorts are
+    therefore semicolon-separated instead, all on one line:
+        tactic A | discount A; tactic B | discount B; tactic C | discount C
+    Newlines are ALSO accepted as a separator (split on ';' or '\n'), so
+    this still works unchanged if triggered another way where a real
+    newline does survive (the GitHub API/CLI, for instance).
+
+    Returns None if unset/blank -- the caller should fall back to full
+    auto-discovery in that case. Blank entries are skipped; a malformed
+    entry (missing the "|") raises rather than silently dropping a cohort
+    you thought you'd included."""
     raw = os.getenv("OVERRIDE_COHORTS", "").strip()
     if not raw:
         return None
 
+    entries = re.split(r"[;\n]", raw)
+
     combos = []
-    for line_num, line in enumerate(raw.splitlines(), start=1):
-        line = line.strip()
-        if not line:
+    for entry_num, entry in enumerate(entries, start=1):
+        entry = entry.strip()
+        if not entry:
             continue
-        if "|" not in line:
+        if "|" not in entry:
             raise ValueError(
-                f"OVERRIDE_COHORTS line {line_num} is missing '|': {line!r}. "
+                f"OVERRIDE_COHORTS entry {entry_num} is missing '|': {entry!r}. "
                 f"Expected format: tactic | discount"
             )
-        tactic, discount = line.split("|", 1)
+        tactic, discount = entry.split("|", 1)
         combos.append({"p1_p2_p3": tactic.strip(), "discount": discount.strip()})
 
     if not combos:
