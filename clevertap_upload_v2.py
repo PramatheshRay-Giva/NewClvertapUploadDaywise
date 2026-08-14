@@ -94,7 +94,7 @@ FILTERS_TO_PROCESS = [
     {"day": "thursday",  "p1_p2_p3": "", "discount": ""},
     {"day": "friday",    "p1_p2_p3": "", "discount": ""},
     {"day": "saturday",  "p1_p2_p3": "", "discount": ""},
-    {"day": "sunday",    "p1_p2_p3": "Next Repeat Order Any - Offline Gold", "discount": ["Freebies","BAU Offers"]},
+    {"day": "sunday",    "p1_p2_p3": "", "discount": ""},
     # Optional: add "label": "..." to any entry above to override the
     # auto-built segment/file name, e.g.:
     # {"day": "friday", "p1_p2_p3": "...", "discount": "...", "label": "Friday_Push"},
