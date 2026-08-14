@@ -1,0 +1,69 @@
+name: CleverTap Daily Cohort Upload
+
+# ============================================================================
+# Two ways this runs:
+#
+# 1. SCHEDULED (the "on: schedule" cron below) -- fires automatically every
+#    day, no inputs. The Python script figures out which day it actually is
+#    in IST and uploads all cohorts discovered for that day. This is the
+#    "just run today's cohorts" path.
+#
+# 2. MANUAL ("Run workflow" button in the Actions tab) -- lets you override
+#    either or both of:
+#      - which day to run (instead of today's real day)
+#      - which specific cohorts to run (instead of every discovered cohort
+#        for that day)
+#    Both overrides are optional and independent. Leave both blank and a
+#    manual run behaves identically to the scheduled one.
+# ============================================================================
+
+on:
+  schedule:
+    # 2:00 AM IST = 20:30 UTC on the PREVIOUS calendar day (IST is UTC+5:30).
+    # GitHub does not guarantee scheduled workflows fire at the exact
+    # minute -- expect it to start within a few minutes of 20:30 UTC, not
+    # necessarily on the dot, especially during GitHub's busier periods.
+    - cron: '30 20 * * *'
+
+  workflow_dispatch:
+    inputs:
+      day:
+        description: >
+          Override which day to run (monday/tuesday/.../sunday). Leave
+          blank to use today's actual day in IST.
+        required: false
+        type: string
+        default: ''
+      cohorts:
+        description: >
+          Override which cohorts to run for that day. One "tactic | discount"
+          pair per line, e.g.:
+            Next Repeat Order Any - Offline Gold | BAU Offers
+            Online to Offline - Gold | 2000 Promo coins
+          Leave blank to run every cohort discovered for that day.
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests pandas
+
+      - name: Run CleverTap upload pipeline
+        env:
+          MB_PASSWORD: ${{ secrets.MB_PASSWORD }}
+          CT_PASSCODE: ${{ secrets.CT_PASSCODE }}
+          OVERRIDE_DAY: ${{ github.event.inputs.day }}
+          OVERRIDE_COHORTS: ${{ github.event.inputs.cohorts }}
+        run: python clevertap_upload_v2.py
