@@ -68,7 +68,37 @@ TEMPLATE_TAG_MAP = {
     "saturday_discount":  "Saturday_Discount",
     "sunday_p1_p2_p3":    "Sunday_P1_P2_P3",
     "sunday_discount":    "Sunday_Discount",
+    "oc_status":          "OC_status",
 }
+
+# Tactics that get split into OC1 / OC2 / rest (OC3+) as three separate
+# CleverTap segments instead of one undivided one. Every other tactic is
+# unaffected -- runs exactly as before, single segment, no OC_status filter
+# applied at all.
+#
+# "Online to Offline - Silver" was listed twice when this was requested;
+# treated as one tactic here, not two -- there's nothing to distinguish a
+# second entry from the first.
+SPLIT_BY_OC_TACTICS = {
+    "Online to Offline - Gold",
+    "Online to Offline - Silver",
+    "Next Repeat Order Any - Online",
+    "Offline to Online - App New",
+    "Offline to Online - App Repeat",
+    "Next Repeat Order Any - Offline Gold",
+    "Next Repeat Order Any - Offline Silver",
+}
+
+# (oc_bucket_label, oc_status values to pass in the OC_status filter)
+# "Unknown" folded into the OC3Plus/"rest" bucket -- lifetime_orders should
+# never actually be 0/NULL for anyone in the base population this query
+# draws from, but including it costs nothing and closes the gap if that
+# assumption is ever wrong.
+OC_BUCKETS = [
+    ("OC1", ["OC1"]),
+    ("OC2", ["OC2"]),
+    ("OC3Plus", ["OC3", "OC4", "OC4+", "Unknown"]),
+]
 
 # =====================================================
 # FILTERS TO PROCESS
@@ -103,6 +133,26 @@ FILTERS_TO_PROCESS = [
 VALID_DAYS = {
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
 }
+
+# Tactics (P1_P2_P3 values) that need to be split into separate OC1 / OC2 /
+# Rest CleverTap segments instead of one segment for the whole cohort.
+# Applies regardless of which day or discount the tactic shows up under --
+# matched against the tactic VALUE, not any particular filter combination.
+# Requires OC_Status to be a real output column in the SQL (uncommented,
+# not the auditing-only commented-out version).
+OC_SPLIT_TACTICS = {
+    "Online to Offline - Gold",
+    "Online to Offline - Silver",
+    "Next Repeat Order Any - Online",
+    "Offline to Online - App New",
+    "Offline to Online - App Repeat",
+    "Next Repeat Order Any - Offline Gold",
+    "Next Repeat Order Any - Offline Silver",
+}
+
+# "Rest" = every OC_Status that isn't OC1 or OC2, collapsed into one bucket
+# (OC3, OC4, OC4+, Unknown -- not split further).
+OC_SPLIT_BUCKETS = ["OC1", "OC2"]  # checked in order; anything left over is "Rest"
 
 
 # =====================================================
@@ -289,6 +339,42 @@ def get_cohort_override():
     return combos
 
 
+def split_by_oc_status(csv_path):
+    """Splits a fetched CSV into up to 3 sub-CSVs by OC_Status: OC1, OC2,
+    and Rest (every other status collapsed together). Returns a list of
+    (bucket_label, sub_csv_path) tuples for buckets that have at least 1
+    row -- an empty bucket is simply omitted, not uploaded as a 0-row
+    segment. Each sub-CSV keeps the full raw shape (Customer_Phone,
+    OC_Status, Shopify_ID, etc.) -- still needs to go through
+    transform_csv_for_clevertap same as an unsplit cohort's CSV would."""
+    df = pd.read_csv(csv_path)
+
+    if "OC_Status" not in df.columns:
+        raise ValueError(
+            "split_by_oc_status called but the fetched CSV has no OC_Status "
+            "column -- confirm 'b.OC_status AS OC_Status' is uncommented in "
+            "the SQL's SELECT list."
+        )
+
+    base_path = csv_path[:-4] if csv_path.endswith(".csv") else csv_path
+    buckets = []
+
+    for bucket_label in OC_SPLIT_BUCKETS:
+        sub_df = df[df["OC_Status"] == bucket_label]
+        if len(sub_df) > 0:
+            sub_path = f"{base_path}_{bucket_label}.csv"
+            sub_df.to_csv(sub_path, index=False)
+            buckets.append((bucket_label, sub_path))
+
+    rest_df = df[~df["OC_Status"].isin(OC_SPLIT_BUCKETS)]
+    if len(rest_df) > 0:
+        sub_path = f"{base_path}_Rest.csv"
+        rest_df.to_csv(sub_path, index=False)
+        buckets.append(("Rest", sub_path))
+
+    return buckets
+
+
 def transform_csv_for_clevertap(file_path):
     """Unchanged from the previous pipeline -- same column name
     (Customer_Phone) and same +91/type=i shape CleverTap expects."""
@@ -358,7 +444,14 @@ MAX_RETRIES = 3
 def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
     """Fetch -> transform -> upload -> retry for ONE cohort. Shared by both
     manual and auto modes so the actual upload logic exists in exactly one
-    place. Mutates failed_cohorts in place on ultimate failure."""
+    place. Mutates failed_cohorts in place on ultimate failure.
+
+    If this cohort's tactic is in OC_SPLIT_TACTICS, uploads up to 3
+    segments (OC1/OC2/Rest) instead of 1. already_uploaded tracks which
+    buckets succeeded across retry attempts within this call, so if e.g.
+    OC1 succeeds and OC2 then fails, a retry only redoes OC2 -- not OC1
+    again, which would otherwise create a duplicate CleverTap segment
+    (CT_REPLACE_EXISTING is False)."""
     print(f"--------------------------------------------------")
     print(f"⚙️ Processing Cohort: {label}")
     print(f"    Filters: {active_filters}")
@@ -367,7 +460,18 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
     segment_name = f"{CT_DATE}_{label}"
     temp_csv = f"{sanitize_for_filename(label)}_temp.csv"
 
+    tactic_value = active_filters.get(f"{day}_p1_p2_p3")
+    needs_split = isinstance(tactic_value, str) and tactic_value in OC_SPLIT_TACTICS
+    if needs_split:
+        print(f"    ✂️  '{tactic_value}' is a split tactic -- will upload as separate OC1/OC2/Rest segments.")
+
+    already_uploaded = set()
+    known_buckets = []  # populated once splitting actually runs; used only
+                         # to report which buckets are still missing if
+                         # every retry attempt ultimately fails
+
     for attempt in range(1, MAX_RETRIES + 1):
+        temp_files_to_clean = [temp_csv]
         try:
             if attempt > 1:
                 print(f"    🔄 Retry Attempt {attempt} of {MAX_RETRIES}...")
@@ -375,24 +479,54 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
             print("    ⬇️ Fetching data from Metabase...")
             fetch_metabase_csv(mb_headers, active_filters, temp_csv)
 
-            print("    🧹 Reformatting CSV for CleverTap...")
-            row_count = transform_csv_for_clevertap(temp_csv)
+            if needs_split:
+                buckets = split_by_oc_status(temp_csv)
+                known_buckets = [b for b, _ in buckets]
+                if not buckets:
+                    print("    ⚠️ 0 rows returned. Skipping upload.")
 
-            if row_count > 0:
-                print(f"    📤 Uploading {row_count:,} rows to CleverTap...")
-                upload_succeeded = upload_to_clevertap(temp_csv, segment_name)
-                if not upload_succeeded:
-                    # upload_to_clevertap prints its own "CT Step N Failed"
-                    # detail above -- this raise is what makes that failure
-                    # actually COUNT. Without it, a False return here was
-                    # silently treated as success: no retry, and the cohort
-                    # never landed in failed_cohorts even though no segment
-                    # was ever created.
-                    raise RuntimeError(
-                        f"CleverTap upload failed for {label} -- see CT Step error above."
-                    )
-            elif row_count == 0:
-                print("    ⚠️ 0 rows returned. Skipping upload.")
+                for bucket_label, bucket_csv in buckets:
+                    temp_files_to_clean.append(bucket_csv)
+
+                    if bucket_label in already_uploaded:
+                        print(f"    ⏭️  [{bucket_label}] already uploaded on a prior attempt -- skipping.")
+                        continue
+
+                    bucket_row_count = transform_csv_for_clevertap(bucket_csv)
+                    bucket_segment_name = f"{segment_name}_{bucket_label}"
+
+                    if bucket_row_count > 0:
+                        print(f"    📤 [{bucket_label}] Uploading {bucket_row_count:,} rows to CleverTap...")
+                        upload_succeeded = upload_to_clevertap(bucket_csv, bucket_segment_name)
+                        if not upload_succeeded:
+                            raise RuntimeError(
+                                f"CleverTap upload failed for {label} [{bucket_label}] -- "
+                                f"see CT Step error above."
+                            )
+                        already_uploaded.add(bucket_label)
+                    elif bucket_row_count == 0:
+                        print(f"    ⚠️ [{bucket_label}] 0 rows after transform. Skipping upload.")
+                        already_uploaded.add(bucket_label)  # nothing left to retry for this bucket
+
+            else:
+                print("    🧹 Reformatting CSV for CleverTap...")
+                row_count = transform_csv_for_clevertap(temp_csv)
+
+                if row_count > 0:
+                    print(f"    📤 Uploading {row_count:,} rows to CleverTap...")
+                    upload_succeeded = upload_to_clevertap(temp_csv, segment_name)
+                    if not upload_succeeded:
+                        # upload_to_clevertap prints its own "CT Step N Failed"
+                        # detail above -- this raise is what makes that failure
+                        # actually COUNT. Without it, a False return here was
+                        # silently treated as success: no retry, and the cohort
+                        # never landed in failed_cohorts even though no segment
+                        # was ever created.
+                        raise RuntimeError(
+                            f"CleverTap upload failed for {label} -- see CT Step error above."
+                        )
+                elif row_count == 0:
+                    print("    ⚠️ 0 rows returned. Skipping upload.")
 
             break  # Success! Break out of the retry loop.
 
@@ -402,12 +536,19 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
                 print("    ⏳ Waiting 10 seconds before retrying...")
                 time.sleep(10)
             else:
-                print(f"    ❌ Pipeline ultimately failed for {label} after {MAX_RETRIES} attempts.")
-                failed_cohorts.append(label)
+                if needs_split:
+                    remaining = [b for b in known_buckets if b not in already_uploaded]
+                    print(f"    ❌ Pipeline ultimately failed for {label} after {MAX_RETRIES} attempts "
+                          f"-- buckets never uploaded: {remaining if remaining else known_buckets}.")
+                    failed_cohorts.append(f"{label} (buckets: {remaining if remaining else known_buckets})")
+                else:
+                    print(f"    ❌ Pipeline ultimately failed for {label} after {MAX_RETRIES} attempts.")
+                    failed_cohorts.append(label)
 
         finally:
-            if os.path.exists(temp_csv):
-                os.remove(temp_csv)
+            for f in temp_files_to_clean:
+                if os.path.exists(f):
+                    os.remove(f)
 
     print("    ⏸️ Sleeping for 5 seconds before moving to the next cohort...")
     time.sleep(5)
