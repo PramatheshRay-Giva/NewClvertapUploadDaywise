@@ -38,8 +38,9 @@ MODE = "auto"
 # get_cohort_override() and OVERRIDE_COHORTS below.
 
 # Automatically grab today's date
-START_DATE = datetime.now().strftime("%Y-%m-%d")  # Metabase format (e.g., 2026-08-13)
-CT_DATE = datetime.now().strftime("%d%b%y")        # CleverTap format (e.g., 13Aug26)
+# Automatically grab today's date in IST, not UTC
+START_DATE = datetime.now(IST).strftime("%Y-%m-%d")  # Metabase format
+CT_DATE = datetime.now(IST).strftime("%d%b%y")        # CleverTap format
 
 CT_ACCOUNT_ID = "R78-Z5K-847Z"
 CT_PASSCODE = os.getenv("CT_PASSCODE")  # Set in repo Settings > Secrets and variables > Actions
