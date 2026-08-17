@@ -340,36 +340,59 @@ def get_cohort_override():
 
 
 def split_by_oc_status(csv_path):
-    """Splits a fetched CSV into up to 3 sub-CSVs by OC_Status: OC1, OC2,
-    and Rest (every other status collapsed together). Returns a list of
-    (bucket_label, sub_csv_path) tuples for buckets that have at least 1
-    row -- an empty bucket is simply omitted, not uploaded as a 0-row
-    segment. Each sub-CSV keeps the full raw shape (Customer_Phone,
-    OC_Status, Shopify_ID, etc.) -- still needs to go through
-    transform_csv_for_clevertap same as an unsplit cohort's CSV would."""
+    """Splits a fetched CSV into up to 5 sub-CSVs based on OC_Status and ARPU_Tier:
+    OC1 High ARPU, OC1 Low/Medium ARPU, OC2 High ARPU, OC2 Low/Medium ARPU, and Rest."""
     df = pd.read_csv(csv_path)
 
-    if "OC_Status" not in df.columns:
+    # Safety check: ensure both columns exist in the downloaded CSV
+    if "OC_Status" not in df.columns or "ARPU_Tier" not in df.columns:
         raise ValueError(
-            "split_by_oc_status called but the fetched CSV has no OC_Status "
-            "column -- confirm 'b.OC_status AS OC_Status' is uncommented in "
-            "the SQL's SELECT list."
+            "split_by_oc_status called but the fetched CSV is missing OC_Status or ARPU_Tier "
+            "-- confirm BOTH are uncommented in the SQL's SELECT list."
         )
 
     base_path = csv_path[:-4] if csv_path.endswith(".csv") else csv_path
     buckets = []
 
-    for bucket_label in OC_SPLIT_BUCKETS:
-        sub_df = df[df["OC_Status"] == bucket_label]
-        if len(sub_df) > 0:
-            sub_path = f"{base_path}_{bucket_label}.csv"
-            sub_df.to_csv(sub_path, index=False)
-            buckets.append((bucket_label, sub_path))
+    # Define our boolean masks for slicing the pandas DataFrame
+    is_oc1 = df["OC_Status"] == "OC1"
+    is_oc2 = df["OC_Status"] == "OC2"
+    is_high_arpu = df["ARPU_Tier"] == "High"
+    is_low_med_arpu = df["ARPU_Tier"].isin(["Low", "Medium"])
 
-    rest_df = df[~df["OC_Status"].isin(OC_SPLIT_BUCKETS)]
-    if len(rest_df) > 0:
+    # 1. OC1 High ARPU
+    mask_oc1_high = is_oc1 & is_high_arpu
+    if mask_oc1_high.any():
+        sub_path = f"{base_path}_OC1_High_ARPU.csv"
+        df[mask_oc1_high].to_csv(sub_path, index=False)
+        buckets.append(("OC1_High_ARPU", sub_path))
+
+    # 2. OC1 Low/Medium ARPU
+    mask_oc1_low_med = is_oc1 & is_low_med_arpu
+    if mask_oc1_low_med.any():
+        sub_path = f"{base_path}_OC1_Low_Medium_ARPU.csv"
+        df[mask_oc1_low_med].to_csv(sub_path, index=False)
+        buckets.append(("OC1_Low_Medium_ARPU", sub_path))
+
+    # 3. OC2 High ARPU
+    mask_oc2_high = is_oc2 & is_high_arpu
+    if mask_oc2_high.any():
+        sub_path = f"{base_path}_OC2_High_ARPU.csv"
+        df[mask_oc2_high].to_csv(sub_path, index=False)
+        buckets.append(("OC2_High_ARPU", sub_path))
+
+    # 4. OC2 Low/Medium ARPU
+    mask_oc2_low_med = is_oc2 & is_low_med_arpu
+    if mask_oc2_low_med.any():
+        sub_path = f"{base_path}_OC2_Low_Medium_ARPU.csv"
+        df[mask_oc2_low_med].to_csv(sub_path, index=False)
+        buckets.append(("OC2_Low_Medium_ARPU", sub_path))
+
+    # 5. Rest (Catches OC3+, Unknown, and any weird edge cases)
+    mask_rest = ~(mask_oc1_high | mask_oc1_low_med | mask_oc2_high | mask_oc2_low_med)
+    if mask_rest.any():
         sub_path = f"{base_path}_Rest.csv"
-        rest_df.to_csv(sub_path, index=False)
+        df[mask_rest].to_csv(sub_path, index=False)
         buckets.append(("Rest", sub_path))
 
     return buckets
