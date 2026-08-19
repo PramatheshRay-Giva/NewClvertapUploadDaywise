@@ -49,6 +49,17 @@ CT_ADMIN_EMAIL = "shah.neil@giva.co"
 CT_CREATOR_NAME = "Pramathesh Ray"
 CT_REPLACE_EXISTING = False
 
+# Promo coin tracking: phone + Shopify ID for every customer added to a
+# CleverTap segment this run, one sheet per segment, emailed as one
+# workbook after the whole run finishes. Separate from CT_ADMIN_EMAIL
+# (that's CleverTap segment-creation attribution, not an inbox).
+GMAIL_SENDER = "pramatheshray.ray@giva.co"
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # Set in repo Settings > Secrets and variables > Actions
+# PROMO_COIN_RECIPIENTS = ["soumya.jain@giva.co", "preeti.chougale@giva.co"]
+PROMO_COIN_RECIPIENTS = ["pramatheshray.ray@giva.co"]
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
+
 # Maps the lowercase BigQuery column name (matches cohort_mapping_v2 and the
 # query's own WHERE clause) to the Metabase template-tag name used in the
 # SQL's {{ }} placeholders. Metabase's API needs the template-tag name, not
@@ -399,6 +410,102 @@ def split_by_oc_status(csv_path):
     return buckets
 
 
+def capture_promo_coin_data(csv_path):
+    """Reads Customer_Phone + Shopify_ID from a freshly fetched CSV, BEFORE
+    transform_csv_for_clevertap runs on it -- that function overwrites the
+    same file path with just type/identity columns, which would destroy
+    this data if called first. Returns None (not an exception) if the
+    columns are missing or there's nothing usable, since a problem in this
+    side feature shouldn't take down the actual CleverTap upload it's
+    piggybacking on."""
+    try:
+        df = pd.read_csv(csv_path)
+        if "Customer_Phone" not in df.columns or "Shopify_ID" not in df.columns:
+            print("    ⚠️ Customer_Phone/Shopify_ID missing -- skipping promo coin capture for this segment.")
+            return None
+        out = df[["Customer_Phone", "Shopify_ID"]].dropna(subset=["Customer_Phone"]).copy()
+        return out if not out.empty else None
+    except Exception as e:
+        print(f"    ⚠️ Could not capture promo coin data: {e}")
+        return None
+
+
+def write_promo_coin_workbook(segment_data, output_path):
+    """segment_data: dict of {segment_name: DataFrame(Customer_Phone,
+    Shopify_ID)}. Sheet names are short and purely sequential (Segment_01,
+    Segment_02, ...) rather than truncated segment names -- truncating a
+    long name to Excel's 31-character limit tends to cut off exactly the
+    part that distinguishes one bucket from another (e.g. three sheets from
+    the same split cohort would all truncate to the same shared prefix,
+    with the OC1/OC2/Rest suffix that actually distinguishes them cut off).
+    A first "Index" sheet lists each Segment_NN against its real, full,
+    untruncated segment name and row count, so the workbook stays readable
+    without needing to guess from a chopped-off sheet name."""
+    index_rows = []
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        for i, (segment_name, df) in enumerate(segment_data.items(), start=1):
+            sheet_name = f"Segment_{i:02d}"
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            index_rows.append({
+                "Sheet": sheet_name,
+                "Segment_Name": segment_name,
+                "Row_Count": len(df),
+            })
+
+        # Index written last so it lands as the LAST sheet in file order,
+        # but re-ordered to the FRONT below so it's the first thing anyone
+        # sees when they open the workbook.
+        index_df = pd.DataFrame(index_rows)
+        index_df.to_excel(writer, sheet_name="Index", index=False)
+        writer.book.move_sheet("Index", offset=-len(segment_data))
+
+
+def send_promo_coin_email(attachment_path, segment_count):
+    """Sends the finished workbook via Gmail/Google Workspace SMTP with an
+    App Password. Raises on failure rather than silently swallowing it --
+    a failed send should be visible in the run's logs, not just missing
+    from someone's inbox with no explanation."""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.base import MIMEBase
+    from email.mime.text import MIMEText
+    from email import encoders
+
+    if not GMAIL_APP_PASSWORD:
+        raise ValueError(
+            "GMAIL_APP_PASSWORD is not set. Generate an App Password for "
+            f"{GMAIL_SENDER} in its Google Account security settings, then "
+            "add it as a GitHub Secret named GMAIL_APP_PASSWORD."
+        )
+
+    msg = MIMEMultipart()
+    msg["From"] = GMAIL_SENDER
+    msg["To"] = ", ".join(PROMO_COIN_RECIPIENTS)
+    msg["Subject"] = f"Promo Coin Eligible Customers -- {CT_DATE}"
+
+    body = (
+        f"Attached: phone number + Shopify ID for every customer added to a "
+        f"CleverTap segment in today's run ({CT_DATE}), one sheet per "
+        f"segment ({segment_count} sheet(s) total)."
+    )
+    msg.attach(MIMEText(body, "plain"))
+
+    with open(attachment_path, "rb") as f:
+        part = MIMEBase("application", "octet-stream")
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header(
+        "Content-Disposition",
+        f"attachment; filename={os.path.basename(attachment_path)}",
+    )
+    msg.attach(part)
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_SENDER, PROMO_COIN_RECIPIENTS, msg.as_string())
+
+
 def transform_csv_for_clevertap(file_path):
     """Unchanged from the previous pipeline -- same column name
     (Customer_Phone) and same +91/type=i shape CleverTap expects."""
@@ -465,7 +572,7 @@ def upload_to_clevertap(file_path, segment_name):
 MAX_RETRIES = 3
 
 
-def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
+def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts, promo_coin_sheets):
     """Fetch -> transform -> upload -> retry for ONE cohort. Shared by both
     manual and auto modes so the actual upload logic exists in exactly one
     place. Mutates failed_cohorts in place on ultimate failure.
@@ -475,7 +582,15 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
     buckets succeeded across retry attempts within this call, so if e.g.
     OC1 succeeds and OC2 then fails, a retry only redoes OC2 -- not OC1
     again, which would otherwise create a duplicate CleverTap segment
-    (CT_REPLACE_EXISTING is False)."""
+    (CT_REPLACE_EXISTING is False).
+
+    promo_coin_sheets: dict mutated in place, {segment_name: DataFrame} for
+    the phone/Shopify-ID workbook. A segment's data is captured from the
+    raw CSV BEFORE transform_csv_for_clevertap overwrites it, but only
+    committed into promo_coin_sheets AFTER that segment's upload actually
+    succeeds -- so a failed or not-yet-retried segment never contributes a
+    sheet, and a retry can't double-commit a segment that already
+    succeeded on an earlier attempt."""
     print(f"--------------------------------------------------")
     print(f"⚙️ Processing Cohort: {label}")
     print(f"    Filters: {active_filters}")
@@ -516,6 +631,12 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
                         print(f"    ⏭️  [{bucket_label}] already uploaded on a prior attempt -- skipping.")
                         continue
 
+                    # Captured BEFORE transform overwrites bucket_csv with
+                    # just type/identity columns. Held locally, not
+                    # committed to promo_coin_sheets yet -- only happens
+                    # below once upload_to_clevertap actually succeeds.
+                    coin_df = capture_promo_coin_data(bucket_csv)
+
                     bucket_row_count = transform_csv_for_clevertap(bucket_csv)
                     bucket_segment_name = f"{segment_name}_{bucket_label}"
 
@@ -528,11 +649,17 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
                                 f"see CT Step error above."
                             )
                         already_uploaded.add(bucket_label)
+                        if coin_df is not None:
+                            promo_coin_sheets[bucket_segment_name] = coin_df
                     elif bucket_row_count == 0:
                         print(f"    ⚠️ [{bucket_label}] 0 rows after transform. Skipping upload.")
                         already_uploaded.add(bucket_label)  # nothing left to retry for this bucket
 
             else:
+                # Same capture-before-transform, commit-after-upload pattern
+                # as the split path above.
+                coin_df = capture_promo_coin_data(temp_csv)
+
                 print("    🧹 Reformatting CSV for CleverTap...")
                 row_count = transform_csv_for_clevertap(temp_csv)
 
@@ -549,6 +676,8 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts):
                         raise RuntimeError(
                             f"CleverTap upload failed for {label} -- see CT Step error above."
                         )
+                    if coin_df is not None:
+                        promo_coin_sheets[segment_name] = coin_df
                 elif row_count == 0:
                     print("    ⚠️ 0 rows returned. Skipping upload.")
 
@@ -587,6 +716,8 @@ def run_pipeline():
         return
 
     failed_cohorts = []
+    promo_coin_sheets = {}  # {segment_name: DataFrame(Customer_Phone, Shopify_ID)},
+                             # accumulated across the whole run, emailed once at the end
 
     if MODE == "manual":
         print(f"🚀 Starting Pipeline (manual) for {len(FILTERS_TO_PROCESS)} slots. As-of Date: {START_DATE}\n")
@@ -604,7 +735,7 @@ def run_pipeline():
                 continue
 
             label = build_label(day, active_filters, entry)
-            process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts)
+            process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts, promo_coin_sheets)
 
     elif MODE == "auto":
         try:
@@ -647,11 +778,31 @@ def run_pipeline():
                 f"{day}_discount": combo["discount"],
             }
             label = build_label(day, active_filters, combo)
-            process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts)
+            process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts, promo_coin_sheets)
 
     else:
         print(f"❌ Unknown MODE: {MODE!r}. Must be \"manual\" or \"auto\".")
         return
+
+    # =====================================================
+    # PROMO COIN WORKBOOK + EMAIL
+    # =====================================================
+    if promo_coin_sheets:
+        print(f"📊 Building promo coin workbook -- {len(promo_coin_sheets)} sheet(s)...")
+        workbook_path = f"promo_coin_customers_{CT_DATE}.xlsx"
+        try:
+            write_promo_coin_workbook(promo_coin_sheets, workbook_path)
+            print(f"📧 Emailing workbook to {', '.join(PROMO_COIN_RECIPIENTS)}...")
+            send_promo_coin_email(workbook_path, len(promo_coin_sheets))
+            print("📧 Email sent successfully.")
+        except Exception as e:
+            print(f"❌ Promo coin workbook/email failed: {e}")
+            print("    (CleverTap uploads above are unaffected by this -- only the coin-tracking email failed.)")
+        finally:
+            if os.path.exists(workbook_path):
+                os.remove(workbook_path)
+    else:
+        print("📊 No promo coin data captured this run -- skipping workbook/email.")
 
     # =====================================================
     # FINAL SUMMARY LOG
