@@ -511,7 +511,7 @@ def send_promo_coin_email(attachment_path, segment_count):
     msg = MIMEMultipart()
     msg["From"] = GMAIL_SENDER
     msg["To"] = ", ".join(PROMO_COIN_RECIPIENTS)
-    msg["Subject"] = f"Promo Coin Eligible Customers -- {CT_DATE}"
+    msg["Subject"] = f"Shopify id of users -- {CT_DATE}"
 
     body = (
         f"Attached: phone number + Shopify ID for every customer added to a "
