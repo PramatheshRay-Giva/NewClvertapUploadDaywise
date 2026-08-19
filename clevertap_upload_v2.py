@@ -56,6 +56,8 @@ CT_REPLACE_EXISTING = False
 GMAIL_SENDER = "pramatheshray.ray@giva.co"
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # Set in repo Settings > Secrets and variables > Actions
 PROMO_COIN_RECIPIENTS = ["soumya.jain@giva.co", "preeti.chougale@giva.co"]
+# Who gets the alert email if a cohort fails?
+ALERT_EMAIL_RECIPIENTS = ["pramatheshray.ray@giva.co"]
 # PROMO_COIN_RECIPIENTS = ["pramatheshray.ray@giva.co"]
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -534,6 +536,51 @@ def send_promo_coin_email(attachment_path, segment_count):
         server.sendmail(GMAIL_SENDER, PROMO_COIN_RECIPIENTS, msg.as_string())
 
 
+def send_failure_email(failed_cohorts):
+    """Sends a plain text alert email listing the cohorts that failed, plus a copy-paste recovery string."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    if not GMAIL_APP_PASSWORD:
+        print("⚠️ GMAIL_APP_PASSWORD not set. Cannot send failure alert email.")
+        return
+
+    msg = MIMEMultipart()
+    msg["From"] = GMAIL_SENDER
+    msg["To"] = ", ".join(ALERT_EMAIL_RECIPIENTS)
+    msg["Subject"] = f"⚠️ CleverTap Pipeline Alert: {len(failed_cohorts)} Cohort(s) Failed -- {CT_DATE}"
+
+    body = f"The following {len(failed_cohorts)} cohort(s) ultimately failed after {MAX_RETRIES} attempts today:\n\n"
+    
+    # 1. Print the human-readable errors
+    for cohort in failed_cohorts:
+        body += f"   - {cohort['msg']}\n"
+    
+    # 2. Build the exact copy-paste string joined by semicolons
+    copy_paste_all = "; ".join([c["copy_paste"] for c in failed_cohorts])
+
+    body += "\n======================================================\n"
+    body += "🔄 HOW TO RETRY MANUALLY\n"
+    body += "======================================================\n"
+    body += "1. Go to the GitHub Actions tab -> 'CleverTap Daily Cohort Upload'\n"
+    body += "2. Click 'Run workflow'\n"
+    body += "3. Copy the exact text below and paste it into the 'cohorts' field:\n\n"
+    body += f"{copy_paste_all}\n\n"
+    body += "4. Click the green 'Run workflow' button.\n"
+
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_SENDER, ALERT_EMAIL_RECIPIENTS, msg.as_string())
+        print(f"📧 Failure alert email sent to {', '.join(ALERT_EMAIL_RECIPIENTS)}")
+    except Exception as e:
+        print(f"❌ Could not send failure alert email: {e}")
+
+
 def transform_csv_for_clevertap(file_path):
     """Unchanged from the previous pipeline -- same column name
     (Customer_Phone) and same +91/type=i shape CleverTap expects."""
@@ -717,14 +764,19 @@ def process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts, p
                 print("    ⏳ Waiting 10 seconds before retrying...")
                 time.sleep(10)
             else:
+                # Capture the raw tactic and discount to build the copy-paste string
+                tactic = active_filters.get(f"{day}_p1_p2_p3", "")
+                discount = active_filters.get(f"{day}_discount", "")
+                copy_paste = f"{tactic} | {discount}"
+
                 if needs_split:
                     remaining = [b for b in known_buckets if b not in already_uploaded]
                     print(f"    ❌ Pipeline ultimately failed for {label} after {MAX_RETRIES} attempts "
                           f"-- buckets never uploaded: {remaining if remaining else known_buckets}.")
-                    failed_cohorts.append(f"{label} (buckets: {remaining if remaining else known_buckets})")
+                    failed_cohorts.append({"msg": f"{label} (buckets: {remaining if remaining else known_buckets})", "copy_paste": copy_paste})
                 else:
                     print(f"    ❌ Pipeline ultimately failed for {label} after {MAX_RETRIES} attempts.")
-                    failed_cohorts.append(label)
+                    failed_cohorts.append({"msg": label, "copy_paste": copy_paste})
 
         finally:
             for f in temp_files_to_clean:
@@ -835,15 +887,24 @@ def run_pipeline():
     # =====================================================
     # FINAL SUMMARY LOG
     # =====================================================
+    # =====================================================
+    # FINAL SUMMARY LOG
+    # =====================================================
+# =====================================================
+    # FINAL SUMMARY LOG
+    # =====================================================
     print("\n==================================================")
     print("🎉 Pipeline Execution Complete!")
 
     if failed_cohorts:
         print(f"⚠️ The following {len(failed_cohorts)} cohort(s) failed after {MAX_RETRIES} attempts:")
         for cohort in failed_cohorts:
-            print(f"   - {cohort}")
+            print(f"   - {cohort['msg']}")
         print("\n💡 TIP: re-run to retry -- auto mode will rediscover the same combos; "
               "manual mode needs those entries put back in FILTERS_TO_PROCESS.")
+        
+        print("📧 Sending failure alert email...")
+        send_failure_email(failed_cohorts)
     else:
         print("✅ All cohorts processed successfully with 0 failures!")
     print("==================================================\n")
