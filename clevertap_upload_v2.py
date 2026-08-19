@@ -231,7 +231,26 @@ def fetch_metabase_csv(headers, filters, output_file):
     """filters: dict of {bigquery_column_name: value_or_list_of_values}.
     Only the columns present here get filtered -- everything else in the
     query's 14 optional filters stays blank/skipped, same as leaving a box
-    empty in the Metabase UI."""
+    empty in the Metabase UI.
+
+    Fetches via /query/json rather than /query/csv, then writes the CSV
+    ourselves via pandas. Metabase's own CSV export doesn't reliably quote
+    field values containing a raw comma or newline -- and this query's
+    output always carries all 14 day-tactic/discount columns for every
+    matched customer regardless of which day is being filtered, so even a
+    Thursday-targeted fetch can be corrupted by a comma buried in some
+    customer's Tuesday label. That misaligns field boundaries partway
+    through large files and crashes pandas' downstream read_csv with an
+    "Expected N fields, saw M" error. JSON has no such ambiguity -- string
+    values are explicitly delimited regardless of content -- so converting
+    to CSV ourselves sidesteps the failure mode rather than working around
+    one bad row (which would mean silently dropping real customers).
+
+    Trade-off: the full response is now held in memory before writing,
+    rather than streamed straight to disk. For row/column counts seen so
+    far (hundreds of thousands of rows, ~20 columns) this is still modest,
+    comfortably within a GitHub Actions runner's limits -- worth
+    re-checking if a cohort ever grows dramatically larger."""
     parameters = [
         {
             "type": "date/single",
@@ -254,19 +273,28 @@ def fetch_metabase_csv(headers, filters, output_file):
             "value": values,
         })
 
-    url = f"{MB_BASE_URL}/api/card/{MB_CARD_ID}/query/csv"
+    url = f"{MB_BASE_URL}/api/card/{MB_CARD_ID}/query/json"
     resp = requests.post(
         url, headers=headers, json={"parameters": parameters},
-        stream=True, timeout=900,
+        timeout=900,
     )
 
     if resp.status_code != 200:
         raise RuntimeError(f"Query failed ({resp.status_code}): {resp.text[:500]}")
 
-    with open(output_file, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
+    rows = resp.json()
+
+    if not rows:
+        # 0 rows matched. A bare pd.DataFrame([]).to_csv() would write a
+        # genuinely empty (zero-byte) file, which pd.read_csv can't parse
+        # at all (raises EmptyDataError) rather than cleanly reporting 0
+        # rows downstream -- so write a minimal valid header instead.
+        with open(output_file, "w") as f:
+            f.write("Customer_Phone\n")
+        return
+
+    df = pd.DataFrame(rows)
+    df.to_csv(output_file, index=False)
 
 
 def fetch_combinations(headers):
