@@ -59,12 +59,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests pandas
+        # Added openpyxl here to support Excel workbook generation
+        run: pip install requests pandas openpyxl
 
       - name: Run CleverTap upload pipeline
         env:
           MB_PASSWORD: ${{ secrets.MB_PASSWORD }}
           CT_PASSCODE: ${{ secrets.CT_PASSCODE }}
+          # Added the email app password secret here
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           OVERRIDE_DAY: ${{ github.event.inputs.day }}
           OVERRIDE_COHORTS: ${{ github.event.inputs.cohorts }}
         run: python -u clevertap_upload_v2.py  # -u = unbuffered stdout, so log lines appear as they're printed instead of arriving in delayed batches
