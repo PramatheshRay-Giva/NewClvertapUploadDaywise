@@ -55,10 +55,10 @@ CT_REPLACE_EXISTING = False
 # (that's CleverTap segment-creation attribution, not an inbox).
 GMAIL_SENDER = "pramatheshray.ray@giva.co"
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # Set in repo Settings > Secrets and variables > Actions
-PROMO_COIN_RECIPIENTS = ["soumya.jain@giva.co", "preeti.chougale@giva.co"]
+# PROMO_COIN_RECIPIENTS = ["soumya.jain@giva.co", "preeti.chougale@giva.co"]
 # Who gets the alert email if a cohort fails?
 ALERT_EMAIL_RECIPIENTS = ["pramatheshray.ray@giva.co"]
-# PROMO_COIN_RECIPIENTS = ["pramatheshray.ray@giva.co"]
+PROMO_COIN_RECIPIENTS = ["pramatheshray.ray@giva.co"]
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 
@@ -881,28 +881,65 @@ def run_pipeline():
     # =====================================================
     # PROMO COIN WORKBOOK + EMAIL
     # =====================================================
+# =====================================================
+    # PROMO COIN WORKBOOK + EMAIL
+    # =====================================================
     if promo_coin_sheets:
-        import math
-        total_sheets = len(promo_coin_sheets)
-        print(f"📊 Building promo coin workbook -- {total_sheets} sheet(s) total...")
+        print("📊 Building promo coin workbooks (Row-capped at ~12MB per file)...")
         
-        # Split into chunks of 6 sheets per email to stay well under the 25MB limit
-        CHUNK_SIZE = 6 
-        items = list(promo_coin_sheets.items())
-        total_parts = math.ceil(total_sheets / CHUNK_SIZE)
+        MAX_ROWS_PER_FILE = 800000  # Safely keeps the Excel file under 15MB
         
-        for i in range(0, total_sheets, CHUNK_SIZE):
-            chunk = dict(items[i:i+CHUNK_SIZE])
-            part_num = (i // CHUNK_SIZE) + 1
+        chunks = []
+        current_chunk = {}
+        current_row_count = 0
+        
+        for segment_name, df in promo_coin_sheets.items():
+            df_len = len(df)
+            start_idx = 0
             
-            workbook_path = f"promo_coin_customers_{CT_DATE}_Part{part_num}.xlsx"
+            # This loop handles slicing if a single segment is massive
+            while start_idx < df_len:
+                space_left = MAX_ROWS_PER_FILE - current_row_count
+                end_idx = start_idx + space_left
+                
+                # Slice the dataframe to fit whatever space is left in the current file
+                sliced_df = df.iloc[start_idx:end_idx]
+                
+                # Label it clearly if we had to slice a single segment across multiple files
+                if start_idx == 0 and end_idx >= df_len:
+                    label = segment_name
+                else:
+                    label = f"{segment_name}_Pt{(start_idx // MAX_ROWS_PER_FILE) + 1}"
+                
+                current_chunk[label] = sliced_df
+                current_row_count += len(sliced_df)
+                
+                # If the current file is full, save it to our batch list and reset
+                if current_row_count >= MAX_ROWS_PER_FILE:
+                    chunks.append(current_chunk)
+                    current_chunk = {}
+                    current_row_count = 0
+                
+                start_idx = end_idx
+                
+        # Append the final partially-filled chunk if it has leftover data
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        total_parts = len(chunks)
+        print(f"📦 Data split into {total_parts} email part(s).")
+        
+        for i, chunk in enumerate(chunks, start=1):
+            workbook_path = f"promo_coin_customers_{CT_DATE}_Part{i}.xlsx"
+            sheets_in_this_chunk = len(chunk)
+            
             try:
                 write_promo_coin_workbook(chunk, workbook_path)
-                print(f"📧 Emailing workbook {part_num}/{total_parts} to {', '.join(PROMO_COIN_RECIPIENTS)}...")
-                send_promo_coin_email(workbook_path, len(chunk), part_num=part_num, total_parts=total_parts)
-                print(f"📧 Part {part_num} email sent successfully.")
+                print(f"📧 Emailing workbook {i}/{total_parts} to {', '.join(PROMO_COIN_RECIPIENTS)}...")
+                send_promo_coin_email(workbook_path, sheets_in_this_chunk, part_num=i, total_parts=total_parts)
+                print(f"📧 Part {i} email sent successfully.")
             except Exception as e:
-                print(f"❌ Promo coin workbook/email failed for Part {part_num}: {e}")
+                print(f"❌ Promo coin workbook/email failed for Part {i}: {e}")
                 print("    (CleverTap uploads above are unaffected by this -- only the coin-tracking email failed.)")
             # finally:
             #     if os.path.exists(workbook_path):
