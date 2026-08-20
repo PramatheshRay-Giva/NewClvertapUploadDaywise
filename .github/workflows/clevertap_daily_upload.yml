@@ -66,8 +66,16 @@ jobs:
         env:
           MB_PASSWORD: ${{ secrets.MB_PASSWORD }}
           CT_PASSCODE: ${{ secrets.CT_PASSCODE }}
-          # Added the email app password secret here
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           OVERRIDE_DAY: ${{ github.event.inputs.day }}
           OVERRIDE_COHORTS: ${{ github.event.inputs.cohorts }}
-        run: python -u clevertap_upload_v2.py  # -u = unbuffered stdout, so log lines appear as they're printed instead of arriving in delayed batches
+        run: python -u clevertap_upload_v2.py
+
+      # --- NEW ARTIFACT STEP ADDED HERE ---
+      - name: Save Excel Workbooks to GitHub
+        uses: actions/upload-artifact@v4
+        if: always()  # This ensures it saves the files even if the script crashed on the very last cohort
+        with:
+          name: promo-coin-workbooks
+          path: "*.xlsx"
+          retention-days: 90
