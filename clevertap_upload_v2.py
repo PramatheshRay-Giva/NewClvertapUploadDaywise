@@ -55,10 +55,10 @@ CT_REPLACE_EXISTING = False
 # (that's CleverTap segment-creation attribution, not an inbox).
 GMAIL_SENDER = "pramatheshray.ray@giva.co"
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # Set in repo Settings > Secrets and variables > Actions
-# PROMO_COIN_RECIPIENTS = ["soumya.jain@giva.co", "preeti.chougale@giva.co"]
+PROMO_COIN_RECIPIENTS = ["soumya.jain@giva.co", "preeti.chougale@giva.co"]
 # Who gets the alert email if a cohort fails?
 ALERT_EMAIL_RECIPIENTS = ["pramatheshray.ray@giva.co"]
-PROMO_COIN_RECIPIENTS = ["pramatheshray.ray@giva.co"]
+# PROMO_COIN_RECIPIENTS = ["pramatheshray.ray@giva.co"]
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 
