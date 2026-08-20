@@ -325,10 +325,11 @@ def fetch_combinations(headers):
     return combos
 
 
-def get_target_day():
+def get_target_days():
     """OVERRIDE_DAY env var wins if set (from workflow_dispatch's "day"
-    input); otherwise today's actual day-of-week in IST. Scheduled runs
-    never set OVERRIDE_DAY, so they always fall through to "today"."""
+    input); otherwise returns today's actual day-of-week in IST. 
+    If today is Friday, it pulls Friday, Saturday, and Sunday.
+    If today is Saturday or Sunday (and no override is set), returns empty."""
     override = os.getenv("OVERRIDE_DAY", "").strip().lower()
     if override:
         if override not in VALID_DAYS:
@@ -336,8 +337,18 @@ def get_target_day():
                 f"OVERRIDE_DAY={override!r} is not a valid day. "
                 f"Must be one of: {', '.join(sorted(VALID_DAYS))}"
             )
-        return override
-    return datetime.now(IST).strftime("%A").lower()
+        return [override]
+    
+    actual_day = datetime.now(IST).strftime("%A").lower()
+    
+    # Front-load the weekend on Friday
+    if actual_day == "friday":
+        return ["friday", "saturday", "sunday"]
+    # Skip actual weekend runs since Friday already handled them
+    elif actual_day in ["saturday", "sunday"]:
+        return []
+        
+    return [actual_day]
 
 
 def get_cohort_override():
@@ -822,11 +833,17 @@ def run_pipeline():
 
     elif MODE == "auto":
         try:
-            target_day = get_target_day()
+            target_days = get_target_days()
         except Exception as e:
             print(f"❌ {e}")
             return
-        print(f"📅 Target day: {target_day.capitalize()}"
+            
+        if not target_days:
+            print("📅 Today is Saturday/Sunday. Weekend cohorts were already processed on Friday. Skipping run.")
+            return
+
+        days_str = ", ".join(d.capitalize() for d in target_days)
+        print(f"📅 Target day(s): {days_str}"
               + (" (from OVERRIDE_DAY)" if os.getenv("OVERRIDE_DAY", "").strip() else " (today, IST)"))
 
         try:
@@ -838,7 +855,8 @@ def run_pipeline():
         if override_combos is not None:
             print(f"🎯 Using {len(override_combos)} manually specified cohort(s) "
                   f"(from OVERRIDE_COHORTS) -- skipping discovery.")
-            combos = [{"day": target_day, **oc} for oc in override_combos]
+            # If overriding cohorts without a day override, assign them to the primary day
+            combos = [{"day": target_days[0], **oc} for oc in override_combos]
         else:
             print("🔎 Discovering cohorts from cohort_mapping_v2...")
             try:
@@ -846,22 +864,14 @@ def run_pipeline():
             except Exception as e:
                 print(f"❌ Discovery failed: {e}")
                 return
-            combos = [c for c in all_combos if c["day"] == target_day]
+            # Now filters for ANY day in our target_days list
+            combos = [c for c in all_combos if c["day"] in target_days]
 
-        print(f"🚀 Starting Pipeline (auto) for {len(combos)} cohort(s) on "
-              f"{target_day.capitalize()}. As-of Date: {START_DATE}\n")
+        print(f"🚀 Starting Pipeline (auto) for {len(combos)} cohort(s) for "
+              f"{days_str}. As-of Date: {START_DATE}\n")
 
         if not combos:
-            print(f"⚠️ No cohorts found for {target_day.capitalize()} -- nothing to upload.")
-
-        for combo in combos:
-            day = combo["day"]
-            active_filters = {
-                f"{day}_p1_p2_p3": combo["p1_p2_p3"],
-                f"{day}_discount": combo["discount"],
-            }
-            label = build_label(day, active_filters, combo)
-            process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts, promo_coin_sheets)
+            print(f"⚠️ No cohorts found for {days_str} -- nothing to upload.")
 
     else:
         print(f"❌ Unknown MODE: {MODE!r}. Must be \"manual\" or \"auto\".")
