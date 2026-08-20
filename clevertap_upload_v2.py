@@ -873,6 +873,17 @@ def run_pipeline():
         if not combos:
             print(f"⚠️ No cohorts found for {days_str} -- nothing to upload.")
 
+        # --- THIS LOOP WAS MISSING! Add it back right here: ---
+        for combo in combos:
+            day = combo["day"]
+            active_filters = {
+                f"{day}_p1_p2_p3": combo["p1_p2_p3"],
+                f"{day}_discount": combo["discount"],
+            }
+            label = build_label(day, active_filters, combo)
+            process_one_cohort(mb_headers, day, active_filters, label, failed_cohorts, promo_coin_sheets)
+        # ------------------------------------------------------
+
     else:
         print(f"❌ Unknown MODE: {MODE!r}. Must be \"manual\" or \"auto\".")
         return
