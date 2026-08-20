@@ -490,11 +490,9 @@ def write_promo_coin_workbook(segment_data, output_path):
         writer.book.move_sheet("Index", offset=-len(segment_data))
 
 
-def send_promo_coin_email(attachment_path, segment_count):
+def send_promo_coin_email(attachment_path, segment_count, part_num=1, total_parts=1):
     """Sends the finished workbook via Gmail/Google Workspace SMTP with an
-    App Password. Raises on failure rather than silently swallowing it --
-    a failed send should be visible in the run's logs, not just missing
-    from someone's inbox with no explanation."""
+    App Password. Raises on failure rather than silently swallowing it."""
     import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.base import MIMEBase
@@ -511,12 +509,17 @@ def send_promo_coin_email(attachment_path, segment_count):
     msg = MIMEMultipart()
     msg["From"] = GMAIL_SENDER
     msg["To"] = ", ".join(PROMO_COIN_RECIPIENTS)
-    msg["Subject"] = f"Shopify id of users -- {CT_DATE}"
+    
+    # Update subject to show parts if there are multiple emails
+    if total_parts > 1:
+        msg["Subject"] = f"Promo Coin Eligible Customers -- {CT_DATE} (Part {part_num} of {total_parts})"
+    else:
+        msg["Subject"] = f"Promo Coin Eligible Customers -- {CT_DATE}"
 
     body = (
         f"Attached: phone number + Shopify ID for every customer added to a "
-        f"CleverTap segment in today's run ({CT_DATE}), one sheet per "
-        f"segment ({segment_count} sheet(s) total)."
+        f"CleverTap segment in today's run ({CT_DATE}).\n\n"
+        f"This file contains {segment_count} segment(s)."
     )
     msg.attach(MIMEText(body, "plain"))
 
@@ -864,23 +867,36 @@ def run_pipeline():
         print(f"❌ Unknown MODE: {MODE!r}. Must be \"manual\" or \"auto\".")
         return
 
+
     # =====================================================
     # PROMO COIN WORKBOOK + EMAIL
     # =====================================================
     if promo_coin_sheets:
-        print(f"📊 Building promo coin workbook -- {len(promo_coin_sheets)} sheet(s)...")
-        workbook_path = f"promo_coin_customers_{CT_DATE}.xlsx"
-        try:
-            write_promo_coin_workbook(promo_coin_sheets, workbook_path)
-            print(f"📧 Emailing workbook to {', '.join(PROMO_COIN_RECIPIENTS)}...")
-            send_promo_coin_email(workbook_path, len(promo_coin_sheets))
-            print("📧 Email sent successfully.")
-        except Exception as e:
-            print(f"❌ Promo coin workbook/email failed: {e}")
-            print("    (CleverTap uploads above are unaffected by this -- only the coin-tracking email failed.)")
-        finally:
-            if os.path.exists(workbook_path):
-                os.remove(workbook_path)
+        import math
+        total_sheets = len(promo_coin_sheets)
+        print(f"📊 Building promo coin workbook -- {total_sheets} sheet(s) total...")
+        
+        # Split into chunks of 6 sheets per email to stay well under the 25MB limit
+        CHUNK_SIZE = 6 
+        items = list(promo_coin_sheets.items())
+        total_parts = math.ceil(total_sheets / CHUNK_SIZE)
+        
+        for i in range(0, total_sheets, CHUNK_SIZE):
+            chunk = dict(items[i:i+CHUNK_SIZE])
+            part_num = (i // CHUNK_SIZE) + 1
+            
+            workbook_path = f"promo_coin_customers_{CT_DATE}_Part{part_num}.xlsx"
+            try:
+                write_promo_coin_workbook(chunk, workbook_path)
+                print(f"📧 Emailing workbook {part_num}/{total_parts} to {', '.join(PROMO_COIN_RECIPIENTS)}...")
+                send_promo_coin_email(workbook_path, len(chunk), part_num=part_num, total_parts=total_parts)
+                print(f"📧 Part {part_num} email sent successfully.")
+            except Exception as e:
+                print(f"❌ Promo coin workbook/email failed for Part {part_num}: {e}")
+                print("    (CleverTap uploads above are unaffected by this -- only the coin-tracking email failed.)")
+            # finally:
+            #     if os.path.exists(workbook_path):
+            #         os.remove(workbook_path)
     else:
         print("📊 No promo coin data captured this run -- skipping workbook/email.")
 
