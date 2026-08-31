@@ -41,8 +41,8 @@ MODE = "auto"
 # Automatically grab today's date in IST, not UTC
 # START_DATE = datetime.now(IST).strftime("%Y-%m-%d")  # Metabase format
 # CT_DATE = datetime.now(IST).strftime("%d%b%y")        # CleverTap format
-START_DATE = "2026-09-02"  # Force Metabase to use Sept 1 logic
-CT_DATE = "26Aug26"
+START_DATE = "2026-09-01"  # Force Metabase to use Sept 1 logic
+CT_DATE = "25Aug26"
 
 CT_ACCOUNT_ID = "R78-Z5K-847Z"
 CT_PASSCODE = os.getenv("CT_PASSCODE")  # Set in repo Settings > Secrets and variables > Actions
